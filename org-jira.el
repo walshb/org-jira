@@ -370,7 +370,7 @@ jql."
 
 (defun org-jira-get-issue-by-id (id)
   "Get an issue by its ID."
-  (interactive (list (read-string "Issue ID: " "BYHI-" 'org-jira-issue-id-history)))
+  (interactive (list (read-string "Issue ID: " (concat org-jira-proj-id "-") 'org-jira-issue-id-history)))
   (push id org-jira-issue-id-history)
   (let* ((jql (format "id = %s" id))
          (restdata (jira-rest-do-jql-search jql)))
@@ -471,7 +471,11 @@ See`org-jira-get-issue-list'"
                     (mapc (lambda (heading-entry)
                             (ensure-on-issue-id
                                 issue-id
-                              (let* ((entry-heading (concat (symbol-name heading-entry) (format ": [[%s][%s]]" (concat "https://jira.byhiras.com/browse/" issue-id) issue-id))))
+                              (let* ((entry-heading
+                                      (concat (symbol-name heading-entry)
+                                              (format ": [[%s][%s]]"
+                                                      (concat jira-rest-server "/browse/" issue-id)
+                                                      issue-id))))
                                 (setq p (org-find-exact-headline-in-buffer entry-heading))
                                 (if (and p (>= p (point-min))
                                          (<= p (point-max)))
@@ -648,8 +652,7 @@ See`org-jira-get-issue-list'"
           (equal summary ""))
       (error "Must provide all information!"))
   (let* ((project-components (jira-rest-get-components project))
-         ;;         (user (completing-read "Assignee: " (mapcar 'car jira-users)))
-         (user "Ben Walsh")  ;; XXX
+         (user jira-rest-username)
          (ticket-struct (append (list (cons 'project (list (cons 'key project)))
                                       (cons 'issuetype (org-jira-lookup type
                                                                         (if (and (boundp 'parent-id) parent-id)
@@ -660,11 +663,12 @@ See`org-jira-get-issue-list'"
                                                                  (format " (subtask of [jira:%s])" parent-id)
                                                                "")))
                                       (cons 'description description)
-                                      (cons 'priority (org-jira-lookup priority
-                                                                       (jira-rest-get-priorities)))
                                       (cons 'assignee (list (cons 'name user))))
-                                (unless (equal fix-version "")
-                                  (list (cons 'fixVersions (vector (list (cons 'name fix-version)))))))))
+                                (and priority (not (equal priority ""))
+                                     (list (cons 'priority (org-jira-lookup priority
+                                                                            (jira-rest-get-priorities)))))
+                                (and fix-version (not (equal fix-version ""))
+                                     (list (cons 'fixVersions (vector (list (cons 'name fix-version)))))))))
     ticket-struct))
 
 ;;;###autoload
@@ -697,8 +701,11 @@ See`org-jira-get-issue-list'"
           (equal summary ""))
       (error "Must provide all information!"))
   (let* ((parent-id (org-jira-parse-issue-id))
-         (ticket-struct (org-jira-get-issue-struct project type summary description nil)))
-    (org-jira-get-issues (list (jira-rest-create-subtask ticket-struct parent-id)))))
+         (fix-version nil)
+         (priority nil)
+         (ticket-struct (org-jira-get-issue-struct project type summary description fix-version priority))
+         (issue (jira-rest-create-subtask ticket-struct parent-id)))
+    (and issue (org-jira-get-issues (org-jira-get-issue-by-id issue)))))
 
 (defun org-jira-strip-string (str)
   "Remove the beginning and ending white space for a string STR."
