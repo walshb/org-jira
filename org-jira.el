@@ -305,6 +305,8 @@ Example: \"2012-01-09T08:59:15.000Z\" becomes \"2012-01-09
   (let ((tmp  (or (cdr (assoc key comment)) "")))
     (cond ((or (eq key 'created) (eq key 'updated))
            (org-jira-transform-time-format tmp))
+          ((eq key 'author)
+           (cdr (assoc 'name (cdr (assoc key comment)))))
           (t
            tmp))))
 
@@ -338,6 +340,8 @@ Example: \"2012-01-09T08:59:15.000Z\" becomes \"2012-01-09
                   (mapconcat (lambda (ver)
                                (cdr (assoc 'name ver)))
                              val " "))
+                 ((eq key 'comment)
+                  (cdr (assoc 'comments val)))
                  (t
                   val))))))
 
@@ -493,7 +497,7 @@ See`org-jira-get-issue-list'"
 
                                 (insert (replace-regexp-in-string "^" "  " (org-jira-get-issue-val heading-entry issue))))))
                           '(description))
-                    (org-jira-update-comments-for-current-issue)
+                    (org-jira-update-comments-for-current-issue (org-jira-get-issue-val 'comment issue))
                     )))))
           issues)
     (switch-to-buffer project-buffer)))
@@ -506,8 +510,8 @@ See`org-jira-get-issue-list'"
          (comment-id (org-jira-get-from-org 'comment 'id))
          (comment (replace-regexp-in-string "^  " "" (org-jira-get-comment-body comment-id))))
     (if comment-id
-        (jiralib-edit-comment comment-id comment)
-      (jiralib-add-comment issue-id comment)
+        (jira-rest-edit-comment issue-id comment-id comment)
+      (jira-rest-add-comment issue-id comment)
       (org-jira-delete-current-comment)
       (org-jira-update-comments-for-current-issue))))
 
@@ -525,18 +529,17 @@ See`org-jira-get-issue-list'"
       (insert issue-id)
       (kill-region (point-min) (point-max)))))
 
-(defun org-jira-update-comments-for-current-issue ()
+(defun org-jira-update-comments-for-current-issue (&optional known-comments)
   "Update the comments for the current issue."
   (let* ((issue-id (org-jira-get-from-org 'issue 'key))
-         ;;(comments (jiralib-get-comments issue-id)))
-         (comments '()))
+         (comments (or known-comments (jira-rest-get-comments issue-id))))
     (mapc (lambda (comment)
             (ensure-on-issue-id issue-id
               (let* ((comment-id (cdr (assoc 'id comment)))
                      (comment-author (or (car (rassoc
-                                               (cdr (assoc 'author comment))
+                                               (org-jira-get-comment-val 'author comment)
                                                jira-users))
-                                         (cdr (assoc 'author comment))))
+                                         (org-jira-get-comment-val 'author comment)))
                      (comment-headline (format "Comment: %s" comment-author)))
                 (setq p (org-find-entry-with-id comment-id))
                 (if (and p (>= p (point-min))
@@ -559,7 +562,7 @@ See`org-jira-get-issue-list'"
                     (org-entry-put (point) "updated" updated)))
                 (goto-char (point-max))
                 (insert (replace-regexp-in-string "^" "  " (or (cdr (assoc 'body comment)) ""))))))
-          (mapcan (lambda (comment) (if (string= (cdr (assoc 'author comment))
+          (mapcan (lambda (comment) (if (string= (org-jira-get-comment-val 'author comment)
                                                  "admin")
                                         nil
                                       (list comment)))
@@ -734,14 +737,15 @@ See`org-jira-get-issue-list'"
 (defvar org-jira-actions-history nil)
 (defun org-jira-read-action (actions)
   "Read issue workflow progress ACTIONS."
-  (let ((action (completing-read
-                 "Action: "
-                 (mapcar 'cdr actions)
-                 nil
-                 t
-                 (car org-jira-actions-history)
-                 'org-jira-actions-history)))
-    (car (rassoc action actions))))
+  (let ((action-name (completing-read
+                      "Action: "
+                      (mapcar (lambda (action) (cdr (assoc 'name action))) actions)
+                      nil
+                      t
+                      (car org-jira-actions-history)
+                      'org-jira-actions-history)))
+    (mapcan (lambda (action) (and (equal action-name (cdr (assoc 'name action))) action))
+            actions)))
 
 (defvar org-jira-fields-history nil)
 (defun org-jira-read-field (fields)
@@ -765,12 +769,12 @@ See`org-jira-get-issue-list'"
   "Read issue workflow progress resolution."
   (let ((resolution (completing-read
                      "Resolution: "
-                     (mapcar 'cdr (jiralib-get-resolutions))
+                     (mapcar 'cdr (jira-rest-get-resolutions))
                      nil
                      t
                      (car org-jira-resolution-history)
                      'org-jira-resolution-history)))
-    (car (rassoc resolution (jiralib-get-resolutions)))))
+    (car (rassoc resolution (jira-rest-get-resolutions)))))
 
 ;;;###autoload
 (defun org-jira-refresh-issue ()
@@ -787,9 +791,12 @@ See`org-jira-get-issue-list'"
   (interactive)
   (ensure-on-issue
    (let* ((issue-id (org-jira-id))
-          (actions (jiralib-get-available-actions issue-id))
+          (actions (jira-rest-get-available-actions issue-id))
           (action (org-jira-read-action actions))
-          (fields (jiralib-get-fields-for-action issue-id action))
+          (fields (mapcar (lambda (field)
+                            (cons (car field)
+                                  (cdr (assoc 'name (cdr field)))))
+                          (cdr (assoc 'fields action))))
           (field-key)
           (custom-fields-collector nil)
           (custom-fields (progn
@@ -820,8 +827,9 @@ See`org-jira-get-issue-list'"
                                                'org-jira-fields-values-history)))
                                       custom-fields-collector))))
                            custom-fields-collector))
-          (issue (jiralib-progress-workflow-action issue-id action custom-fields)))
-     (org-jira-get-issues (list issue)))))
+          (action-id (cdr (assoc 'id action))))
+     (jira-rest-progress-workflow-action issue-id action-id custom-fields)
+     (org-jira-get-issues (org-jira-get-issue-by-id issue-id)))))
 
 
 (defun org-jira-update-issue-details (issue-id)
@@ -912,7 +920,7 @@ it is a symbol, it will be converted to string."
   "Open the current issue in external browser."
   (interactive)
   (ensure-on-issue
-   (browse-url (concat jiralib-url "/browse/" (org-jira-id)))))
+   (browse-url (concat jira-rest-server "/browse/" (org-jira-id)))))
 
 ;;;###autoload
 (defun org-jira-get-issues-from-filter (filter)
@@ -921,16 +929,16 @@ it is a symbol, it will be converted to string."
 Provide this command in case some users are not able to use
 client side jql (maybe because of JIRA server version?)."
   (interactive
-   (list (completing-read "Filter: " (mapcar 'cdr (jiralib-get-saved-filters)))))
-  (org-jira-get-issues (jiralib-get-issues-from-filter (car (rassoc filter (jiralib-get-saved-filters))))))
+   (list (completing-read "Filter: " (mapcar 'cdr (jira-rest-get-saved-filters)))))
+  (org-jira-get-issues (jira-rest-get-issues-from-filter (car (rassoc filter (jira-rest-get-saved-filters))))))
 
 ;;;###autoload
 (defun org-jira-get-issues-from-filter-headonly (filter)
   "Get issues *head only* from saved filter named FILTER.
 See `org-jira-get-issues-from-filter'."
   (interactive
-   (list (completing-read "Filter: " (mapcar 'cdr (jiralib-get-saved-filters)))))
-  (org-jira-get-issues-headonly (jiralib-get-issues-from-filter (car (rassoc filter (jiralib-get-saved-filters))))))
+   (list (completing-read "Filter: " (mapcar 'cdr (jira-rest-get-saved-filters)))))
+  (org-jira-get-issues-headonly (jira-rest-get-issues-from-filter (car (rassoc filter (jira-rest-get-saved-filters))))))
 
 (org-add-link-type "jira" 'org-jira-open)
 
